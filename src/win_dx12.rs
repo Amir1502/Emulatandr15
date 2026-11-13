@@ -181,8 +181,11 @@ pub const WS_MAXIMIZEBOX: u32 = 0x0001_0000;
 pub const WS_THICKFRAME: u32 = 0x0004_0000;
 pub const WS_EX_APPWINDOW: u32 = 0x0004_0000;
 
-pub const SW_SHOW: i32 = 5;
 pub const SW_HIDE: i32 = 0;
+pub const SW_MAXIMIZE: i32 = 3;
+pub const SW_SHOW: i32 = 5;
+pub const SW_MINIMIZE: i32 = 6;
+pub const SW_RESTORE: i32 = 9;
 
 pub const PM_REMOVE: u32 = 0x0001;
 pub const WM_DESTROY: u32 = 0x0002;
@@ -211,6 +214,8 @@ pub const VK_F1: usize = 0x70;
 pub const VK_F2: usize = 0x71;
 pub const VK_F3: usize = 0x72;
 pub const VK_F4: usize = 0x73;
+pub const VK_F5: usize = 0x74;
+pub const VK_F6: usize = 0x75;
 
 pub const CS_OWNDC: u32 = 0x0020;
 pub const CS_HREDRAW: u32 = 0x0002;
@@ -1323,6 +1328,7 @@ extern "system" {
     pub fn DestroyWindow(hWnd: HWND) -> BOOL;
     pub fn DefWindowProcW(hWnd: HWND, Msg: u32, wParam: WPARAM, lParam: LPARAM) -> LRESULT;
     pub fn ShowWindow(hWnd: HWND, nCmdShow: i32) -> BOOL;
+    pub fn IsZoomed(hWnd: HWND) -> BOOL;
     pub fn PeekMessageW(
         lpMsg: *mut MSG,
         hWnd: HWND,
@@ -1352,6 +1358,7 @@ extern "system" {
         lpName: *const u16,
     ) -> HANDLE;
     pub fn WaitForSingleObject(hHandle: HANDLE, dwMilliseconds: u32) -> u32;
+    pub fn Sleep(dwMilliseconds: u32);
     pub fn CloseHandle(hObject: HANDLE) -> BOOL;
     pub fn QueryPerformanceCounter(lpPerformanceCount: *mut i64) -> BOOL;
     pub fn QueryPerformanceFrequency(lpFrequency: *mut i64) -> BOOL;

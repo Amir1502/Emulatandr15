@@ -755,6 +755,25 @@ impl RawInputMapper {
         ((qpc as u128 * 1_000_000_000) / self.qpc_freq as u128) as u64
     }
 
+    /// Returns normalized `(wasd_xy in [-1, 1], aim_uv in [0, 1], wasd_mask)` for live HUD overlays.
+    pub fn normalized_state(&self) -> ([f32; 2], [f32; 2], u8) {
+        let mask = self.wasd_mask.load(Ordering::Relaxed);
+        let mut dx = 0.0f32;
+        let mut dy = 0.0f32;
+        if (mask & 1) != 0 { dy -= 1.0; }
+        if (mask & 4) != 0 { dy += 1.0; }
+        if (mask & 2) != 0 { dx -= 1.0; }
+        if (mask & 8) != 0 { dx += 1.0; }
+        let len = (dx * dx + dy * dy).sqrt();
+        if len > 1.0 {
+            dx /= len;
+            dy /= len;
+        }
+        let ax = (self.aim_x.load(Ordering::Relaxed) as f32 / TOUCH_MAX_COORD as f32).clamp(0.0, 1.0);
+        let ay = (self.aim_y.load(Ordering::Relaxed) as f32 / TOUCH_MAX_COORD as f32).clamp(0.0, 1.0);
+        ([dx, dy], [ax, ay], mask)
+    }
+
     /// Zero-allocation handler invoked directly from `WM_INPUT`.
     pub fn handle_wm_input(&self, lparam: LPARAM, ring: &InputSpscRing) {
         let mut raw: RAWINPUT = unsafe { zeroed() };

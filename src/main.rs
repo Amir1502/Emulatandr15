@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use stage1_memory::{
-    IvshmemSharedRegion, SharedFrameDescriptor, LARGE_PAGE_SIZE,
+    IvshmemSharedRegion, SharedFrameDescriptor, VirtioInputEvent, LARGE_PAGE_SIZE,
 };
 use stage2_renderer::{Dx12Renderer, FramelessWindow, TelemetryHud};
 use stage3_vm_input::{
@@ -32,6 +32,39 @@ impl SharedRegionSync {
     fn as_ref(&self) -> &IvshmemSharedRegion {
         unsafe { &*self.0 }
     }
+}
+
+/// Drains lock-free input events, cycles a low-latency 48 kHz audio burst through `VirtioSndRing`,
+/// and updates live HUD stick/aim visualization coordinates.
+fn pump_shm_queues(
+    shm: &IvshmemSharedRegion,
+    mapper: &RawInputMapper,
+    hud: &mut TelemetryHud,
+    audio_phase: &mut f32,
+) {
+    let mut ev_buf = [VirtioInputEvent::default(); 64];
+    loop {
+        let popped = shm.input_ring.try_pop_batch(&mut ev_buf);
+        hud.input_events_total += popped as u64;
+        if popped < ev_buf.len() {
+            break;
+        }
+    }
+
+    let mut pcm_in = [[0.0f32; 2]; 16];
+    for frame in &mut pcm_in {
+        let sample = (*audio_phase).sin() * 0.02;
+        *frame = [sample, sample];
+        *audio_phase = (*audio_phase + 0.057_595_86) % core::f32::consts::TAU;
+    }
+    let _ = shm.audio_ring.push_frames(&pcm_in);
+    let mut pcm_out = [[0.0f32; 2]; 16];
+    let consumed = shm.audio_ring.pop_frames(&mut pcm_out);
+    hud.audio_frames_total += consumed as u64;
+
+    let (wasd_xy, aim_uv, _) = mapper.normalized_state();
+    hud.wasd_xy = wasd_xy;
+    hud.aim_uv = aim_uv;
 }
 
 fn main() {
@@ -145,22 +178,26 @@ fn run(self_test: bool) -> Result<(), String> {
         let _ = std::fs::remove_file(&blk_path);
 
         // Render 120 live DirectX 12 frames (Kawase blur + SDF HUD + frametime graph + sidebar).
+        let mut audio_phase = 0.0f32;
         for _ in 0..120 {
             window.pump_messages();
+            pump_shm_queues(shm, &mapper, &mut hud, &mut audio_phase);
             renderer.render_frame(&mut hud)?;
         }
         renderer.wait_for_gpu_idle();
         unsafe { CloseHandle(demo_shared_nt_handle) };
+        hud.export_benchmark_json("titan_benchmark.json", &renderer.adapter_name)?;
 
         let (ws_mib, priv_mib) = query_process_memory_mib();
         println!("=== TITAN AOSP 15 ZERO-OVERHEAD SELF-TEST ===");
         println!("Stage 1 | IvshmemSharedRegion : {} bytes (<= {} Large Page)", size_of::<IvshmemSharedRegion>(), LARGE_PAGE_SIZE);
-        println!("Stage 1 | SPSC Input Events   : {} events queued lock-free", queued_input_events);
-        println!("Stage 1 | Audio Ring Latency  : {:.2} ms ({} frames @ 48kHz)", shm.audio_ring.period_latency_ms(), 192);
+        println!("Stage 1 | SPSC Input Events   : {} events queued lock-free ({} drained)", queued_input_events, hud.input_events_total);
+        println!("Stage 1 | Audio Ring Latency  : {:.2} ms ({} frames @ 48kHz, {} streamed)", shm.audio_ring.period_latency_ms(), 192, hud.audio_frames_total);
         println!("Stage 2 | GPU Adapter         : {}", renderer.adapter_name);
         println!("Stage 2 | VRR Tearing Support : {}", renderer.tearing_supported);
         println!("Stage 2 | External NT Import  : {} (DXGI/Vulkan Zero-Copy)", hud.external_handle_active);
         println!("Stage 2 | Shader Disk Cache   : {}", if renderer.cache_hit { "HIT (pipeline_cache.bin)" } else { "COMPILED & CACHED" });
+        println!("Stage 2 | Benchmark JSON      : titan_benchmark.json (exported={})", hud.benchmark_exported);
         println!("Stage 2 | 120-Frame Telemetry : Avg {:.1} FPS | 1% Low {:.1} FPS | Last {:.2} ms | Reflex {:.2} ms",
             hud.avg_fps, hud.one_percent_low_fps, hud.last_frametime_ms, hud.reflex_latency_ms);
         println!("Stage 2 | Shell RAM Footprint : WorkingSet {:.2} MiB (pre {:.2} MiB) | Private {:.2} MiB (pre {:.2} MiB)",
@@ -179,12 +216,16 @@ fn run(self_test: bool) -> Result<(), String> {
 
     // Interactive Desktop Loop (0% idle overhead via WaitForSingleObject on Waitable SwapChain).
     let mut running = true;
+    let mut audio_phase = 0.0f32;
     while running {
         running = window.pump_messages();
         if !running {
             break;
         }
         window.sync_hud_flags(&mut hud);
+        if window.state.export_benchmark.swap(false, Ordering::AcqRel) {
+            let _ = hud.export_benchmark_json("titan_benchmark.json", &renderer.adapter_name);
+        }
         mapper
             .keymap_enabled
             .store(hud.keymapper_active, Ordering::Relaxed);
@@ -195,6 +236,7 @@ fn run(self_test: bool) -> Result<(), String> {
             renderer.resize(nw, nh)?;
         }
 
+        pump_shm_queues(shm, &mapper, &mut hud, &mut audio_phase);
         renderer.poll_shared_mailbox(shm, &mut hud);
         renderer.render_frame(&mut hud)?;
     }

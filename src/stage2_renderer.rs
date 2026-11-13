@@ -35,6 +35,8 @@ cbuffer FrameConstants : register(b0)
     float  g_blurRadius;
     uint   g_hudVisible;
     uint   g_sidebarOpen;
+    float2 g_wasdXy;
+    float2 g_aimUv;
 };
 
 struct VSInput
@@ -105,10 +107,65 @@ float3 sampleKawaseBlur(float2 uv, float radiusPx)
 float4 PSGuest(VSOutput i) : SV_TARGET
 {
     float4 sampleCol = g_guestTex.Sample(g_linearClamp, i.uv);
+    float aspect = max(g_viewportSize.x, 1.0) / max(g_viewportSize.y, 1.0);
+    float2 aspectVec = float2(aspect, 1.0);
+
+    // Animated Android 15 (Material You / API 35) 240 Hz live canvas blended with guest VRAM texture.
+    float waveA = sin(i.uv.x * 5.2 + g_timeSec * 0.95 + cos(i.uv.y * 3.8 - g_timeSec * 0.55));
+    float waveB = cos(i.uv.y * 6.4 - g_timeSec * 0.75 + sin(i.uv.x * 4.1 + g_timeSec * 0.40));
+    float3 aurora = float3(0.06, 0.14, 0.28)
+                  + 0.06 * float3(0.18, 0.48, 0.95) * (0.5 + 0.5 * waveA)
+                  + 0.05 * float3(0.16, 0.85, 0.62) * (0.5 + 0.5 * waveB);
+    float3 bg = max(sampleCol.rgb * 0.78, aurora);
+
+    // Subtle Material You dock icons at bottom-center (Android 15 launcher preview).
+    float4 dockIcons = 0.0;
+    for (int k = 0; k < 4; ++k)
+    {
+        float cx = 0.425 + (float)k * 0.05;
+        float2 d = (i.uv - float2(cx, 0.885)) * aspectVec;
+        float boxDist = max(abs(d.x), abs(d.y)) - 0.017;
+        float iconMask = 1.0 - smoothstep(0.0, 0.004, boxDist);
+        float pulse = 0.75 + 0.25 * sin(g_timeSec * 2.2 + (float)k * 1.3);
+        float3 iconCol = (k == 0) ? float3(0.24, 0.82, 0.58)
+                       : (k == 1) ? float3(0.28, 0.62, 0.98)
+                       : (k == 2) ? float3(0.88, 0.48, 0.36)
+                                  : float3(0.66, 0.50, 0.96);
+        bg = lerp(bg, iconCol * pulse, iconMask * 0.72);
+    }
+
+    // Android 15 bottom gesture navigation pill.
+    float pillDx = abs(i.uv.x - 0.5) - 0.075;
+    float pillDy = abs(i.uv.y - 0.968) - 0.0045;
+    float pillMask = 1.0 - smoothstep(0.0, 0.0025, max(pillDx, pillDy));
+    bg = lerp(bg, float3(0.88, 0.93, 1.0), pillMask * 0.80);
+
+    // Live WASD Virtual Analog Joystick Overlay (MT Slot 0).
+    float2 joyCenter = float2(0.14, 0.78);
+    float joyDist = length((i.uv - joyCenter) * aspectVec);
+    float joyRing = 1.0 - smoothstep(0.001, 0.004, abs(joyDist - 0.062));
+    float2 thumbPos = joyCenter + float2(g_wasdXy.x * (0.042 / aspect), g_wasdXy.y * 0.042);
+    float thumbDist = length((i.uv - thumbPos) * aspectVec);
+    float thumbFill = 1.0 - smoothstep(0.014, 0.018, thumbDist);
+    float stickActive = step(0.01, length(g_wasdXy));
+    float3 stickCol = lerp(float3(0.35, 0.68, 1.0), float3(0.24, 0.95, 0.66), stickActive);
+    bg = lerp(bg, stickCol, joyRing * (0.45 + 0.35 * stickActive));
+    bg = lerp(bg, stickCol, thumbFill * (0.55 + 0.40 * stickActive));
+
+    // Live Mouse Aim Reticle (MT Slot 1).
+    float2 aimDiff = (i.uv - g_aimUv) * aspectVec;
+    float aimRad = length(aimDiff);
+    float aimRing = 1.0 - smoothstep(0.001, 0.0035, abs(aimRad - 0.022));
+    float aimCrossH = step(abs(aimDiff.y), 0.0018) * step(abs(aimDiff.x), 0.032) * step(0.010, abs(aimDiff.x));
+    float aimCrossV = step(abs(aimDiff.x), 0.0018) * step(abs(aimDiff.y), 0.032) * step(0.010, abs(aimDiff.y));
+    float aimCenter = 1.0 - smoothstep(0.002, 0.0045, aimRad);
+    float reticle = max(max(aimRing, aimCenter), max(aimCrossH, aimCrossV));
+    bg = lerp(bg, float3(0.30, 0.96, 0.72), reticle * 0.85);
+
     // Subtle dark bezel vignette at extreme edges so frameless shell feels crisp.
     float2 edge = min(i.uv, 1.0 - i.uv);
     float vignette = saturate(min(edge.x, edge.y) * 90.0);
-    return float4(sampleCol.rgb * lerp(0.86, 1.0, vignette), 1.0);
+    return float4(bg * lerp(0.86, 1.0, vignette), 1.0);
 }
 
 float4 PSUi(VSOutput i) : SV_TARGET
@@ -163,6 +220,8 @@ struct FrameConstants {
     blur_radius: f32,
     hud_visible: u32,
     sidebar_open: u32,
+    wasd_xy: [f32; 2],
+    aim_uv: [f32; 2],
 }
 
 #[repr(C)]
@@ -190,12 +249,18 @@ pub struct TelemetryHud {
     pub host_private_mib: f64,
     pub target_vrr_hz: u32,
     pub tearing_supported: bool,
+    pub frame_pacing_enabled: bool,
     pub hud_visible: bool,
     pub sidebar_open: bool,
     pub keymapper_active: bool,
     pub large_pages_active: bool,
     pub p_core_count: usize,
     pub external_handle_active: bool,
+    pub wasd_xy: [f32; 2],
+    pub aim_uv: [f32; 2],
+    pub input_events_total: u64,
+    pub audio_frames_total: u64,
+    pub benchmark_exported: bool,
 }
 
 impl TelemetryHud {
@@ -215,12 +280,18 @@ impl TelemetryHud {
             host_private_mib: 0.0,
             target_vrr_hz: 240,
             tearing_supported,
+            frame_pacing_enabled: false,
             hud_visible: true,
             sidebar_open: true,
             keymapper_active: true,
             large_pages_active: false,
             p_core_count: 0,
             external_handle_active: false,
+            wasd_xy: [0.0, 0.0],
+            aim_uv: [0.5, 0.5],
+            input_events_total: 0,
+            audio_frames_total: 0,
+            benchmark_exported: false,
         }
     }
 
@@ -273,6 +344,53 @@ impl TelemetryHud {
         let take = count.min(self.filled);
         let start = (self.cursor + FRAMETIME_HISTORY - take) % FRAMETIME_HISTORY;
         (0..take).map(move |i| self.frametimes_ms[(start + i) % FRAMETIME_HISTORY])
+    }
+
+    /// Exports live telemetry & hardware capability metrics as a JSON benchmark snapshot.
+    pub fn export_benchmark_json(&mut self, path: &str, adapter_name: &str) -> Result<(), String> {
+        let escaped_gpu = adapter_name.replace('\\', "\\\\").replace('"', "\\\"");
+        let json = format!(
+            "{{\n\
+  \"emulator\": \"Titan AOSP 15 (API 35)\",\n\
+  \"gpu_adapter\": \"{escaped_gpu}\",\n\
+  \"total_frames\": {},\n\
+  \"avg_fps\": {:.2},\n\
+  \"one_percent_low_fps\": {:.2},\n\
+  \"point_one_percent_low_fps\": {:.2},\n\
+  \"last_frametime_ms\": {:.3},\n\
+  \"reflex_latency_ms\": {:.3},\n\
+  \"target_vrr_hz\": {},\n\
+  \"frame_pacing_enabled\": {},\n\
+  \"tearing_supported\": {},\n\
+  \"external_nt_handle_active\": {},\n\
+  \"large_pages_active\": {},\n\
+  \"p_cores_pinned\": {},\n\
+  \"host_working_set_mib\": {:.2},\n\
+  \"host_private_mib\": {:.2},\n\
+  \"input_events_processed\": {},\n\
+  \"audio_frames_processed\": {}\n\
+}}\n",
+            self.total_frames,
+            self.avg_fps,
+            self.one_percent_low_fps,
+            self.point_one_percent_low_fps,
+            self.last_frametime_ms,
+            self.reflex_latency_ms,
+            self.target_vrr_hz,
+            self.frame_pacing_enabled,
+            self.tearing_supported,
+            self.external_handle_active,
+            self.large_pages_active,
+            self.p_core_count,
+            self.host_ram_mib,
+            self.host_private_mib,
+            self.input_events_total,
+            self.audio_frames_total,
+        );
+        fs::write(path, json)
+            .map_err(|e| format!("Failed writing benchmark JSON {path}: {e}"))?;
+        self.benchmark_exported = true;
+        Ok(())
     }
 }
 
@@ -1348,9 +1466,22 @@ impl Dx12Renderer {
             }
         }
 
-        // Measure frametime via high-resolution QPC.
+        // Measure frametime via high-resolution QPC (with optional VRR precision pacing).
         let mut now_qpc = 0i64;
         unsafe { QueryPerformanceCounter(&mut now_qpc) };
+        if hud.frame_pacing_enabled && hud.target_vrr_hz > 0 {
+            let target_ticks = ((self.qpc_freq as f64) / (hud.target_vrr_hz as f64)) as i64;
+            let deadline = self.last_frame_qpc.saturating_add(target_ticks);
+            while now_qpc < deadline {
+                let rem_ms = ((deadline - now_qpc) * 1000) / self.qpc_freq.max(1);
+                if rem_ms > 18 {
+                    unsafe { Sleep(1) };
+                } else {
+                    core::hint::spin_loop();
+                }
+                unsafe { QueryPerformanceCounter(&mut now_qpc) };
+            }
+        }
         let dt_sec = ((now_qpc - self.last_frame_qpc).max(1) as f64) / (self.qpc_freq as f64);
         self.last_frame_qpc = now_qpc;
         let time_sec = ((now_qpc - self.start_qpc) as f64) / (self.qpc_freq as f64);
@@ -1398,6 +1529,8 @@ impl Dx12Renderer {
             blur_radius: 5.5,
             hud_visible: hud.hud_visible as u32,
             sidebar_open: hud.sidebar_open as u32,
+            wasd_xy: hud.wasd_xy,
+            aim_uv: hud.aim_uv,
         };
 
         let upload_gpu_base = unsafe {
@@ -1521,7 +1654,11 @@ impl Dx12Renderer {
         push_rect(out, &mut n, [0.0, 33.0, w, 1.0], [0.24, 0.56, 0.98, 0.45], 0.0, 0.0, 1);
         push_text(out, &mut n, 14.0, 10.0, 2.0, [0.88, 0.94, 1.0, 1.0], "TITAN AOSP 15 // API 35 // DX12 ZERO-COPY");
 
-        // Close button pill in top-right corner
+        // Minimize (-), Maximize/Restore (+), and Close (X) window controls
+        push_rect(out, &mut n, [w - 106.0, 6.0, 28.0, 22.0], [0.12, 0.16, 0.24, 0.90], 6.0, 0.0, 1);
+        push_text(out, &mut n, w - 97.0, 10.0, 2.0, [0.86, 0.92, 1.0, 1.0], "-");
+        push_rect(out, &mut n, [w - 72.0, 6.0, 28.0, 22.0], [0.12, 0.16, 0.24, 0.90], 6.0, 0.0, 1);
+        push_text(out, &mut n, w - 63.0, 10.0, 2.0, [0.86, 0.92, 1.0, 1.0], "+");
         push_rect(out, &mut n, [w - 38.0, 6.0, 28.0, 22.0], [0.65, 0.16, 0.22, 0.85], 6.0, 0.0, 1);
         push_text(out, &mut n, w - 29.0, 10.0, 2.0, [1.0, 0.92, 0.94, 1.0], "X");
 
@@ -1529,8 +1666,8 @@ impl Dx12Renderer {
         if hud.hud_visible {
             let hx = 16.0;
             let hy = 50.0;
-            let hw = 276.0;
-            let hh = 188.0;
+            let hw = 294.0;
+            let hh = 212.0;
             push_rect(out, &mut n, [hx, hy, hw, hh], [0.05, 0.07, 0.11, 0.72], 12.0, 1.2, 0);
 
             let line0 = format!("FPS {:>5.0}   1% LOW {:>4.0}", hud.avg_fps, hud.one_percent_low_fps);
@@ -1546,16 +1683,23 @@ impl Dx12Renderer {
                 if hud.external_handle_active { "NT-HANDLE" } else { "READY" },
                 if self.cache_hit { "DISK-HIT" } else { "WARMED" }
             );
+            let line4 = format!(
+                "IN {:>5}  SND {:>5}  {}",
+                hud.input_events_total.min(99999),
+                (hud.audio_frames_total / 1000).min(99999),
+                if hud.frame_pacing_enabled { "PACED" } else { "UNCAP" }
+            );
             push_text(out, &mut n, hx + 12.0, hy + 12.0, 2.0, [0.35, 0.88, 0.65, 1.0], &line0);
             push_text(out, &mut n, hx + 12.0, hy + 32.0, 2.0, [0.85, 0.91, 1.0, 1.0], &line1);
             push_text(out, &mut n, hx + 12.0, hy + 52.0, 2.0, [0.55, 0.78, 1.0, 1.0], &line2);
             push_text(out, &mut n, hx + 12.0, hy + 72.0, 1.7, [0.70, 0.78, 0.90, 1.0], &line3);
+            push_text(out, &mut n, hx + 12.0, hy + 91.0, 1.7, [0.46, 0.86, 0.94, 1.0], &line4);
 
             // Frametime graph area
             let gx = hx + 12.0;
-            let gy = hy + 98.0;
+            let gy = hy + 114.0;
             let gw = hw - 24.0;
-            let gh = 74.0;
+            let gh = 82.0;
             push_rect(out, &mut n, [gx, gy, gw, gh], [0.03, 0.04, 0.07, 0.75], 6.0, 1.0, 1);
 
             let bars = 64usize;
@@ -1599,6 +1743,8 @@ impl Dx12Renderer {
                 ("F2  SIDEBAR", hud.sidebar_open),
                 ("F3  VRR 120/144/240", true),
                 ("F4  WASD KEYMAP", hud.keymapper_active),
+                ("F5  FRAME PACER", hud.frame_pacing_enabled),
+                ("F6  EXPORT JSON", hud.benchmark_exported),
                 ("2MB LARGE PAGES", hud.large_pages_active),
             ];
             for (idx, (label, active)) in items.iter().enumerate() {
@@ -1618,8 +1764,8 @@ impl Dx12Renderer {
             }
 
             let cores = format!("P-CORES PINNED: {}", hud.p_core_count);
-            push_text(out, &mut n, sx + 16.0, sy + 306.0, 1.7, [0.40, 0.88, 0.66, 1.0], &cores);
-            push_text(out, &mut n, sx + 16.0, sy + 330.0, 1.7, [0.68, 0.76, 0.88, 1.0], "ESC TO EXIT");
+            push_text(out, &mut n, sx + 16.0, sy + 394.0, 1.7, [0.40, 0.88, 0.66, 1.0], &cores);
+            push_text(out, &mut n, sx + 16.0, sy + 418.0, 1.7, [0.68, 0.76, 0.88, 1.0], "ESC TO EXIT");
         }
 
         n
@@ -1754,6 +1900,12 @@ fn glyph_5x7_bits(b: u8) -> (u32, u32) {
         b'-' => [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000],
         b'/' => [0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000],
         b'%' => [0b11001, 0b11010, 0b00010, 0b00100, 0b01000, 0b01011, 0b10011],
+        b'+' => [0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000],
+        b'_' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111],
+        b'(' => [0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010],
+        b')' => [0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000],
+        b'!' => [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100],
+        b'=' => [0b00000, 0b00000, 0b11111, 0b00000, 0b11111, 0b00000, 0b00000],
         _ => [0; 7],
     };
     let mut bits: u64 = 0;
@@ -1777,6 +1929,9 @@ pub struct WindowState {
     pub toggle_sidebar: AtomicBool,
     pub cycle_vrr: AtomicBool,
     pub toggle_keymapper: AtomicBool,
+    pub toggle_frame_pacing: AtomicBool,
+    pub export_benchmark: AtomicBool,
+    pub sidebar_is_open: AtomicBool,
     pub resized: AtomicBool,
     pub width: std::sync::atomic::AtomicU32,
     pub height: std::sync::atomic::AtomicU32,
@@ -1791,6 +1946,9 @@ impl WindowState {
             toggle_sidebar: AtomicBool::new(false),
             cycle_vrr: AtomicBool::new(false),
             toggle_keymapper: AtomicBool::new(false),
+            toggle_frame_pacing: AtomicBool::new(false),
+            export_benchmark: AtomicBool::new(false),
+            sidebar_is_open: AtomicBool::new(true),
             resized: AtomicBool::new(false),
             width: std::sync::atomic::AtomicU32::new(width),
             height: std::sync::atomic::AtomicU32::new(height),
@@ -1910,6 +2068,12 @@ impl FramelessWindow {
         if self.state.toggle_keymapper.swap(false, Ordering::AcqRel) {
             hud.keymapper_active = !hud.keymapper_active;
         }
+        if self.state.toggle_frame_pacing.swap(false, Ordering::AcqRel) {
+            hud.frame_pacing_enabled = !hud.frame_pacing_enabled;
+        }
+        self.state
+            .sidebar_is_open
+            .store(hud.sidebar_open, Ordering::Relaxed);
     }
 }
 
@@ -1984,7 +2148,7 @@ unsafe extern "system" fn wnd_proc(
                     let mut pt = POINT { x: sx, y: sy };
                     ScreenToClient(hwnd, &mut pt);
                     let w = wr.right - wr.left;
-                    if pt.y >= 0 && pt.y < 34 && pt.x < w - 44 {
+                    if pt.y >= 0 && pt.y < 34 && pt.x < w - 110 {
                         HTCAPTION
                     } else {
                         HTCLIENT
@@ -1998,22 +2162,44 @@ unsafe extern "system" fn wnd_proc(
             let mut rc = RECT::default();
             GetClientRect(hwnd, &mut rc);
             let w = rc.right - rc.left;
-            if y < 34 && x >= w - 44 {
-                if let Some(st) = state {
-                    st.should_quit.store(true, Ordering::Relaxed);
+            if y >= 0 && y < 34 {
+                if x >= w - 38 && x <= w - 10 {
+                    if let Some(st) = state {
+                        st.should_quit.store(true, Ordering::Relaxed);
+                    }
+                    PostQuitMessage(0);
+                    return 0;
+                } else if x >= w - 72 && x <= w - 42 {
+                    if IsZoomed(hwnd) != 0 {
+                        ShowWindow(hwnd, SW_RESTORE);
+                    } else {
+                        ShowWindow(hwnd, SW_MAXIMIZE);
+                    }
+                    return 0;
+                } else if x >= w - 106 && x <= w - 76 {
+                    ShowWindow(hwnd, SW_MINIMIZE);
+                    return 0;
                 }
-                PostQuitMessage(0);
-                return 0;
             }
             if let Some(st) = state {
-                if x >= w - 236 && y >= 82 && y <= 316 {
-                    let btn = (y - 82) / 48;
-                    match btn {
-                        0 => { st.toggle_hud.store(true, Ordering::Release); }
-                        1 => { st.toggle_sidebar.store(true, Ordering::Release); }
-                        2 => { st.cycle_vrr.store(true, Ordering::Release); }
-                        3 => { st.toggle_keymapper.store(true, Ordering::Release); }
-                        _ => {}
+                if st.sidebar_is_open.load(Ordering::Relaxed)
+                    && x >= w - 224
+                    && x <= w - 12
+                    && y >= 82
+                    && y < 370
+                {
+                    let rel = y - 82;
+                    if rel % 48 <= 38 {
+                        let btn = rel / 48;
+                        match btn {
+                            0 => { st.toggle_hud.store(true, Ordering::Release); }
+                            1 => { st.toggle_sidebar.store(true, Ordering::Release); }
+                            2 => { st.cycle_vrr.store(true, Ordering::Release); }
+                            3 => { st.toggle_keymapper.store(true, Ordering::Release); }
+                            4 => { st.toggle_frame_pacing.store(true, Ordering::Release); }
+                            5 => { st.export_benchmark.store(true, Ordering::Release); }
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -2030,6 +2216,8 @@ unsafe extern "system" fn wnd_proc(
                     VK_F2 | VK_TAB => { st.toggle_sidebar.store(true, Ordering::Release); }
                     VK_F3 => { st.cycle_vrr.store(true, Ordering::Release); }
                     VK_F4 => { st.toggle_keymapper.store(true, Ordering::Release); }
+                    VK_F5 => { st.toggle_frame_pacing.store(true, Ordering::Release); }
+                    VK_F6 => { st.export_benchmark.store(true, Ordering::Release); }
                     _ => {}
                 }
             }
@@ -2100,5 +2288,27 @@ mod tests {
         }
         assert_eq!(hud.total_frames, 8);
         assert!(PathBuf::from(PIPELINE_CACHE_FILE).exists());
+    }
+
+    #[test]
+    fn benchmark_json_export_writes_valid_metrics() {
+        let mut hud = TelemetryHud::new(true);
+        hud.record_frametime(4.16, 850);
+        hud.input_events_total = 42;
+        hud.audio_frames_total = 1920;
+
+        let mut tmp = std::env::temp_dir();
+        tmp.push("titan_test_benchmark.json");
+        let path_str = tmp.to_string_lossy().to_string();
+        let _ = fs::remove_file(&tmp);
+
+        hud.export_benchmark_json(&path_str, "Intel(R) UHD Graphics")
+            .expect("write benchmark JSON");
+        assert!(hud.benchmark_exported);
+        let content = fs::read_to_string(&tmp).expect("read benchmark JSON");
+        assert!(content.contains("\"emulator\": \"Titan AOSP 15 (API 35)\""));
+        assert!(content.contains("\"input_events_processed\": 42"));
+        assert!(content.contains("\"audio_frames_processed\": 1920"));
+        let _ = fs::remove_file(&tmp);
     }
 }

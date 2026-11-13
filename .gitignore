@@ -1,5 +1,7 @@
 /target/
 pipeline_cache.bin
+titan_benchmark.json
+*.exe
 *.pdb
 *.log
 .gemini/
