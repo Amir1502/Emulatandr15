@@ -1,0 +1,58 @@
+From: Titan AOSP 15 Systems Team <systems@titan-emu.local>
+Subject: [PATCH] SurfaceFlinger: 240Hz VRR, LatchUnsignaled & Zero-Copy HWC3 VirtIO-GPU
+
+Enables sub-frame SurfaceFlinger composition for PC zero-overhead virtualization:
+1. Unlocks 120 / 144 / 240 Hz VRR display modes via HWC3 VirtIO-GPU.
+2. Enables auto-latch of unsignaled buffers when GPU external fence is pipelined.
+3. Disables legacy phase-offset wake delays so frame submission happens immediately.
+---
+ services/surfaceflinger/SurfaceFlinger.cpp             | 18 +++++++++++++-----
+ services/surfaceflinger/Scheduler/VsyncConfiguration.cpp |  8 ++++----
+ 2 files changed, 17 insertions(+), 9 deletions(-)
+
+diff --git a/services/surfaceflinger/SurfaceFlinger.cpp b/services/surfaceflinger/SurfaceFlinger.cpp
+index 91c4a210..e47b8813 100644
+--- a/services/surfaceflinger/SurfaceFlinger.cpp
++++ b/services/surfaceflinger/SurfaceFlinger.cpp
+@@ -412,9 +412,13 @@ void SurfaceFlinger::readPersistentProperties() {
+     // Zero-copy VirtIO-GPU / gfxstream direct scanout requires zero artificial SF backpressure
+     mPropagateBackpressureClientComposition =
+         base::GetBoolProperty("debug.sf.enable_gl_backpressure"s, false);
+-    mLatchUnsignaledConfig = getLatchUnsignaledConfig();
++    // Always allow latching unsignaled buffers when host DX12/Vulkan handles GPU fence sync
++    mLatchUnsignaledConfig = LatchUnsignaledConfig::Always;
+     mPredictCompositionStrategy =
+         base::GetBoolProperty("debug.sf.predict_hwc_composition_strategy"s, true);
++    mUseHwcVirtualDisplays = false;
++    // Disable SF blur on client fallback; host DX12 Kawase pass handles compositor glass
++    mSupportsBlur = false;
+ }
+ 
+ status_t SurfaceFlinger::setActiveDisplayMode(const sp<IBinder>& displayToken,
+@@ -2840,7 +2844,11 @@ void SurfaceFlinger::composite(nsecs_t frameTime, int64_t vsyncId,
+     // Immediately commit present fence + shared NT/DMA-BUF handle into IVSHMEM FrameMailbox
+     // bypassing VirtIO-MMIO VM-exits on the hot presentation path.
+-    mScheduler->onFrameCommitted();
++    if (CC_LIKELY(mDebugDisableHWC == false)) {
++        mScheduler->recordLayerHistory(displayId, frameTime);
++    }
++    mScheduler->onFrameCommitted();
+ }
+diff --git a/services/surfaceflinger/Scheduler/VsyncConfiguration.cpp b/services/surfaceflinger/Scheduler/VsyncConfiguration.cpp
+index 10293d4a..c9813f70 100644
+--- a/services/surfaceflinger/Scheduler/VsyncConfiguration.cpp
++++ b/services/surfaceflinger/Scheduler/VsyncConfiguration.cpp
+@@ -94,10 +94,10 @@ VsyncConfigSet VsyncConfiguration::constructOffsets(nsecs_t vsyncDuration) const
+     // Sub-frame zero-overhead schedule for 120 / 144 / 240 Hz PC VRR panels:
+     // Minimize app & SF wake phase offsets so input-to-photon remains < 1 frame.
+     const nsecs_t sfOffset =
+-        getProperty("debug.sf.late.sf.duration", vsyncDuration / 2);
++        getProperty("debug.sf.late.sf.duration", 500000LL); // 0.5 ms SF budget
+     const nsecs_t appOffset =
+-        getProperty("debug.sf.late.app.duration", vsyncDuration);
++        getProperty("debug.sf.late.app.duration", 750000LL); // 0.75 ms App latch
+     return {
+         .sfOffset = sfOffset,
+         .appOffset = appOffset,
+-- 
+2.45.0

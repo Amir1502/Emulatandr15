@@ -1,0 +1,16 @@
+[package]
+name = "titan-aosp15-emu"
+version = "0.1.0"
+edition = "2021"
+authors = ["Amir1502"]
+description = "Zero-overhead Android 15 (AOSP API 35) PC Emulator core: WHPX micro-VM, 2MB Large Pages, lock-free SPSC rings, DX12 Zero-Copy SwapChain & Kawase HUD"
+license = "MIT"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

@@ -1,0 +1,5 @@
+/target/
+pipeline_cache.bin
+*.pdb
+*.log
+.gemini/

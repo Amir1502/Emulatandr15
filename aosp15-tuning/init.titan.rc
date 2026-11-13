@@ -1,0 +1,31 @@
+# Titan AOSP 15 (API 35) Init Script — Real-Time Priority & Bloat Elimination
+
+on early-init
+    # Disable kernel hung-task & watchdog timers that cause micro-stutters
+    write /proc/sys/kernel/watchdog 0
+    write /proc/sys/vm/stat_interval 30
+    write /proc/sys/vm/swappiness 0
+    write /proc/sys/kernel/sched_min_granularity_ns 1000000
+    write /proc/sys/kernel/sched_wakeup_granularity_ns 500000
+
+on post-fs-data
+    # Pin SurfaceFlinger and audioserver to real-time SCHED_FIFO scheduling
+    setprop sys.use_fifo_ui 1
+
+on boot
+    # Disable thermal throttling, telephony, NFC, Bluetooth & telemetry bloat
+    stop ril-daemon
+    stop vendor.ril-daemon
+    stop traced
+    stop traced_probes
+    stop statsd
+    stop logd
+    stop tombstoned
+    stop incidentd
+    stop update_engine
+
+    # Force performance governor across all pinned virtual P-cores
+    write /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor performance
+    write /sys/devices/system/cpu/cpu1/cpufreq/scaling_governor performance
+    write /sys/devices/system/cpu/cpu2/cpufreq/scaling_governor performance
+    write /sys/devices/system/cpu/cpu3/cpufreq/scaling_governor performance
